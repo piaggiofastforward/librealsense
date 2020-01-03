@@ -83,8 +83,8 @@ namespace librealsense
     public:
         virtual rs2_metadata_type get_frame_metadata(const rs2_frame_metadata_value& frame_metadata) const = 0;
         virtual bool supports_frame_metadata(const rs2_frame_metadata_value& frame_metadata) const = 0;
+        virtual int get_frame_data_size() const = 0;
         virtual const byte* get_frame_data() const = 0;
-        //TODO: add virtual uint64_t get_frame_data_size() const = 0;
         virtual rs2_time_t get_frame_timestamp() const = 0;
         virtual rs2_timestamp_domain get_frame_timestamp_domain() const = 0;
         virtual void set_timestamp(double new_ts) = 0;
@@ -164,6 +164,14 @@ namespace librealsense
     using stream_profiles = std::vector<std::shared_ptr<stream_profile_interface>>;
     using processing_blocks = std::vector<std::shared_ptr<processing_block_interface>>;
 
+    inline std::ostream& operator << (std::ostream& os, const stream_profiles& profiles)
+    {
+        for (auto&& p : profiles)
+        {
+            os << rs2_format_to_string(p->get_format()) << " " << rs2_stream_to_string(p->get_stream_type()) << ", ";
+        }
+        return os;
+    }
 
     class recommended_proccesing_blocks_interface
     {
@@ -227,7 +235,7 @@ namespace librealsense
         virtual frame_callback_ptr get_frames_callback() const = 0;
         virtual void set_frames_callback(frame_callback_ptr cb) = 0;
         virtual bool is_streaming() const = 0;
-        virtual const device_interface& get_device() = 0;
+        virtual device_interface& get_device() = 0;
 
         virtual ~sensor_interface() = default;
     };
@@ -263,6 +271,8 @@ namespace librealsense
         virtual void tag_profiles(stream_profiles profiles) const = 0;
 
         virtual bool compress_while_record() const = 0;
+
+        virtual bool contradicts(const stream_profile_interface* a, const std::vector<stream_profile>& others) const = 0;
     };
 
     class depth_stereo_sensor;
@@ -320,7 +330,7 @@ namespace librealsense
             depth_sensor_snapshot(depth_units),
             m_stereo_baseline_mm(stereo_bl_mm) {}
 
-        float get_stereo_baseline_mm() const
+        float get_stereo_baseline_mm() const override
         {
             return m_stereo_baseline_mm;
         }

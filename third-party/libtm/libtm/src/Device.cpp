@@ -18,8 +18,8 @@
 #include "Utils.h"
 #include "UsbPlugListener.h"
 #include "TrackingData.h"
-#include "CentralAppFw.h"
-#include "CentralBlFw.h"
+#include "fw_central_app.h"
+#include "fw_central_bl.h"
 
 #define CHUNK_SIZE 512
 #define BUFFER_SIZE 1024
@@ -122,11 +122,11 @@ namespace perc {
             mDeviceStatus = Status::INIT_FAILED;
         }
 
-        /* Enable low power mode */
-        status = SetLowPowerModeInternal(true);
+        /* Disable low power mode */
+        status = SetLowPowerModeInternal(false);
         if (status != Status::SUCCESS)
         {
-            DEVICELOGE("Error: Failed to enable low power mode (0x%X)", status);
+            DEVICELOGE("Error: Failed to disable low power mode (0x%X)", status);
         }
 
         status = GetDeviceInfoInternal();
@@ -198,6 +198,11 @@ namespace perc {
                 }
 
                 case SensorType::Rssi:
+                {
+                    break;
+                }
+
+                case SensorType::Mask:
                 {
                     break;
                 }
@@ -729,7 +734,7 @@ namespace perc {
 
         for (uint8_t i = 0; i < SixDofProfileMax; i++)
         {
-            sixDofProfile.set(false, (SIXDOF_MODE_ENABLE_MAPPING | SIXDOF_MODE_ENABLE_RELOCALIZATION), SIXDOF_INTERRUPT_RATE::SIXDOF_INTERRUPT_RATE_IMU, (SixDofProfileType)i);
+            sixDofProfile.set(false, SIXDOF_MODE_ENABLE_MAPPING | SIXDOF_MODE_ENABLE_RELOCALIZATION, SIXDOF_INTERRUPT_RATE::SIXDOF_INTERRUPT_RATE_IMU, (SixDofProfileType)i);
             profile.set(sixDofProfile, false);
         }
 
@@ -1278,6 +1283,52 @@ namespace perc {
         return fwToHostStatus((MESSAGE_STATUS)response.header.wStatus);
     }
 
+    Status Device::SetExtrinsics(SensorId id, const TrackingData::SensorExtrinsics& extrinsics)
+    {
+        bulk_message_request_set_extrinsics request = { 0 };
+        bulk_message_response_set_extrinsics response;
+
+        if (GET_SENSOR_TYPE(id) >= SensorType::Max)
+        {
+            DEVICELOGE("Unsupported SensorId (0x%X)", id);
+            return Status::ERROR_PARAMETER_INVALID;
+        }
+
+        request.header.wMessageID = DEV_SET_EXTRINSICS;
+        request.header.dwLength = sizeof(request);
+        request.bSensorID = id;
+        for (int r = 0; r < 9; ++r) { request.extrinsics.flRotation[r] = extrinsics.rotation[r]; }
+        for (int t = 0; t < 3; ++t) { request.extrinsics.flTranslation[t] = extrinsics.translation[t]; }
+
+        DEVICELOGD("Set Extrinsics pose for sensor [%d,%d]", GET_SENSOR_TYPE(id), GET_SENSOR_INDEX(id));
+        Bulk_Message msg((uint8_t*)&request, request.header.dwLength, (uint8_t*)&response, sizeof(response), mEndpointBulkMessages | TO_DEVICE, mEndpointBulkMessages | TO_HOST);
+
+        mDispatcher->sendMessage(&mFsm, msg);
+        if (msg.Result != toUnderlying(Status::SUCCESS))
+        {
+            DEVICELOGE("USB Error (0x%X)", msg.Result);
+            return Status::ERROR_USB_TRANSFER;
+        }
+
+        if ((MESSAGE_STATUS)response.header.wStatus == MESSAGE_STATUS::SUCCESS)
+        {
+            DEVICELOGD("Reference sensor [%d,%d]", GET_SENSOR_TYPE(id), GET_SENSOR_INDEX(id));
+
+            for (uint8_t i = 0; i < 9; i++)
+            {
+                DEVICELOGD("Rotation[%d] = %f", i, extrinsics.rotation[i]);
+            }
+
+            for (uint8_t i = 0; i < 3; i++)
+            {
+                DEVICELOGD("Translation[%d] = %f", i, extrinsics.translation[i]);
+            }
+        }
+
+        return fwToHostStatus((MESSAGE_STATUS)response.header.wStatus);
+    }
+
+
     Status Device::SetOccupancyMapControl(uint8_t enable)
     {
         bulk_message_request_occupancy_map_control request = {0};
@@ -1669,12 +1720,6 @@ namespace perc {
     
     Status Device::WriteConfiguration(uint16_t configurationId, uint16_t size, uint8_t* buffer)
     {
-        if ((buffer == NULL) || (size == 0) || (size > MAX_CONFIGURATION_SIZE))
-        {
-            DEVICELOGE("Error: Invalid parameters: buffer = 0x%p, size = %d", buffer, size);
-            return Status::ERROR_PARAMETER_INVALID;
-        }
-
         uint8_t requestBuffer[BUFFER_SIZE] = {0};
         bulk_message_request_write_configuration* request = (bulk_message_request_write_configuration*)requestBuffer;
         bulk_message_response_write_configuration response = {0};
@@ -1710,7 +1755,7 @@ namespace perc {
         Bulk_Message msg((uint8_t*)&request, request.header.dwLength, (uint8_t*)&response, sizeof(response), mEndpointBulkMessages | TO_DEVICE, mEndpointBulkMessages | TO_HOST);
 
         mDispatcher->sendMessage(&mFsm, msg);
-        if (msg.Result != toUnderlying(Status::SUCCESS))
+        if (msg.Result != toUnderlying(Status::SUCCESS) && msg.Result != toUnderlying(Status::TABLE_NOT_EXIST))
         {
             DEVICELOGE("USB Error (0x%X)", msg.Result);
             return Status::ERROR_USB_TRANSFER;
@@ -1769,34 +1814,6 @@ namespace perc {
         return setMsg.Result == 0 ? Status::SUCCESS : Status::COMMON_ERROR;
     }
 
-    Status Device::ResetLocalizationData(uint8_t flag)
-    {
-        bulk_message_request_reset_localization_data request = {0};
-        bulk_message_response_reset_localization_data response = {0};
-
-        if (flag > 1)
-        {
-            DEVICELOGE("Error: Flag (%d) is unknown", flag);
-            return Status::ERROR_PARAMETER_INVALID;
-        }
-
-        request.header.wMessageID = SLAM_RESET_LOCALIZATION_DATA;
-        request.header.dwLength = sizeof(request);
-        request.bFlag = flag;
-
-        DEVICELOGD("Set Reset Localization Data - Flag 0x%X", flag);
-        Bulk_Message msg((uint8_t*)&request, request.header.dwLength, (uint8_t*)&response, sizeof(response), mEndpointBulkMessages | TO_DEVICE, mEndpointBulkMessages | TO_HOST);
-
-        mDispatcher->sendMessage(&mFsm, msg);
-        if (msg.Result != toUnderlying(Status::SUCCESS))
-        {
-            DEVICELOGE("USB Error (0x%X)", msg.Result);
-            return Status::ERROR_USB_TRANSFER;
-        }
-
-        return fwToHostStatus((MESSAGE_STATUS)response.header.wStatus);
-    }
-
     Status Device::SetStaticNode(const char* guid, const TrackingData::RelativePose& relativePose)
     {
         bulk_message_request_set_static_node request = { 0 };
@@ -1825,6 +1842,11 @@ namespace perc {
         Bulk_Message msg((uint8_t*)&request, request.header.dwLength, (uint8_t*)&response, sizeof(response), mEndpointBulkMessages | TO_DEVICE, mEndpointBulkMessages | TO_HOST);
 
         mDispatcher->sendMessage(&mFsm, msg);
+        // ERROR_FW_INTERNAL just means we were unable to set the node
+        if (msg.Result == toUnderlying(Status::ERROR_FW_INTERNAL))
+        {
+            return Status::ERROR_FW_INTERNAL;
+        }
         if (msg.Result != toUnderlying(Status::SUCCESS))
         {
             DEVICELOGE("USB Error (0x%X)", msg.Result);
@@ -1853,6 +1875,11 @@ namespace perc {
         Bulk_Message msg((uint8_t*)&request, request.header.dwLength, (uint8_t*)&response, sizeof(response), mEndpointBulkMessages | TO_DEVICE, mEndpointBulkMessages | TO_HOST);
 
         mDispatcher->sendMessage(&mFsm, msg);
+        // ERROR_FW_INTERNAL just means we were unable to get the node
+        if (msg.Result == toUnderlying(Status::ERROR_FW_INTERNAL))
+        {
+            return Status::ERROR_FW_INTERNAL;
+        }
         if (msg.Result != toUnderlying(Status::SUCCESS))
         {
             DEVICELOGE("USB Error (0x%X)", msg.Result);
@@ -2567,7 +2594,7 @@ namespace perc {
         return fwToHostStatus((MESSAGE_STATUS)response.header.wStatus);
     }
 
-    Status Device::CentralLoadFW(uint8_t* buffer)
+    Status Device::CentralLoadFW(const uint8_t* buffer, int size)
     {
         if (mDeviceInfo.bSKUInfo == SKU_INFO_TYPE::SKU_INFO_TYPE_WITHOUT_BLUETOOTH)
         {
@@ -2575,8 +2602,8 @@ namespace perc {
             return Status::FEATURE_UNSUPPORTED;
         }
         uint32_t addressSize = offsetof(message_fw_update_request, bNumFiles);
-        std::vector<uint8_t> msgArr(addressSize + CENTRAL_APP_SIZE, 0);
-        perc::copy(msgArr.data() + addressSize, buffer, CENTRAL_APP_SIZE);
+        std::vector<uint8_t> msgArr(addressSize + size, 0);
+        perc::copy(msgArr.data() + addressSize, buffer, size);
         message_fw_update_request* msg = (message_fw_update_request*)(msgArr.data());
         MessageON_ASYNC_START setMsg(&mCentralListener, DEV_FIRMWARE_UPDATE, (uint32_t)msgArr.size(), (uint8_t*)msg);
         mFsm.fireEvent(setMsg);
@@ -2611,14 +2638,16 @@ namespace perc {
 
         bool updateApp = false;
 
-        if (CentralBlFw::Version[0] != mDeviceInfo.bCentralBootloaderVersionMajor ||
-            CentralBlFw::Version[1] != mDeviceInfo.bCentralBootloaderVersionMinor ||
-            CentralBlFw::Version[2] != mDeviceInfo.bCentralBootloaderVersionPatch)
+        if (fw_central_bl_version[0] != mDeviceInfo.bCentralBootloaderVersionMajor ||
+            fw_central_bl_version[1] != mDeviceInfo.bCentralBootloaderVersionMinor ||
+            fw_central_bl_version[2] != mDeviceInfo.bCentralBootloaderVersionPatch)
         {
             DEVICELOGD("Updating Central Boot Loader FW [%u.%u.%u] --> [%u.%u.%u]", 
                 mDeviceInfo.bCentralBootloaderVersionMajor, mDeviceInfo.bCentralBootloaderVersionMinor, mDeviceInfo.bCentralBootloaderVersionPatch, 
-                CentralBlFw::Version[0], CentralBlFw::Version[1], CentralBlFw::Version[2]);
-            auto status = CentralLoadFW((uint8_t*)CentralBlFw::Buffer);
+                fw_central_bl_version[0], fw_central_bl_version[1], fw_central_bl_version[2]);
+            int size;
+            auto buffer = fw_get_central_bl(size);
+            auto status = CentralLoadFW(buffer, size);
             if (status != Status::SUCCESS)
             {
                 return status;
@@ -2627,15 +2656,17 @@ namespace perc {
         }
 
         if (updateApp == true ||
-            CentralAppFw::Version[0] != mDeviceInfo.bCentralAppVersionMajor ||
-            CentralAppFw::Version[1] != mDeviceInfo.bCentralAppVersionMinor ||
-            CentralAppFw::Version[2] != mDeviceInfo.bCentralAppVersionPatch ||
-            CentralAppFw::Version[3] != mDeviceInfo.dwCentralAppVersionBuild)
+            fw_central_app_version[0] != mDeviceInfo.bCentralAppVersionMajor ||
+            fw_central_app_version[1] != mDeviceInfo.bCentralAppVersionMinor ||
+            fw_central_app_version[2] != mDeviceInfo.bCentralAppVersionPatch ||
+            fw_central_app_version[3] != mDeviceInfo.dwCentralAppVersionBuild)
         {
             DEVICELOGD("Updating Central Application FW [%u.%u.%u.%u] --> [%u.%u.%u.%u]", 
                 mDeviceInfo.bCentralAppVersionMajor, mDeviceInfo.bCentralAppVersionMinor, mDeviceInfo.bCentralAppVersionPatch, mDeviceInfo.dwCentralAppVersionBuild,
-                CentralAppFw::Version[0], CentralAppFw::Version[1], CentralAppFw::Version[2], CentralAppFw::Version[3]);
-            auto status = CentralLoadFW((uint8_t*)CentralAppFw::Buffer);
+                fw_central_app_version[0], fw_central_app_version[1], fw_central_app_version[2], fw_central_app_version[3]);
+            int size;
+            auto buffer = fw_get_central_app(size);
+            auto status = CentralLoadFW(buffer, size);
             if (status != Status::SUCCESS)
             {
                 return status;
@@ -3932,8 +3963,19 @@ namespace perc {
         }
         else if (res->wStatus == toUnderlying(MESSAGE_STATUS::UNSUPPORTED))
         {
-            DEVICELOGE("MessageID 0x%X (%s) failed with status 0x%X", res->wMessageID, messageCodeToString(LIBUSB_TRANSFER_TYPE_BULK, header->wMessageID).c_str(), res->wStatus);
+            DEVICELOGE("Unsupported MessageID 0x%X (%s) failed with status 0x%X", res->wMessageID, messageCodeToString(LIBUSB_TRANSFER_TYPE_BULK, header->wMessageID).c_str(), res->wStatus);
             msg.Result = toUnderlying(Status::FEATURE_UNSUPPORTED);
+        }
+        // Static node functions return INTERNAL_ERROR to mean "false"
+        else if ((res->wMessageID == SLAM_SET_STATIC_NODE || res->wMessageID == SLAM_GET_STATIC_NODE) &&
+                 res->wStatus == toUnderlying(MESSAGE_STATUS::INTERNAL_ERROR))
+        {
+            msg.Result = toUnderlying(Status::ERROR_FW_INTERNAL);
+        }
+        else if (res->wMessageID == DEV_RESET_CONFIGURATION && res->wStatus == toUnderlying(MESSAGE_STATUS::TABLE_NOT_EXIST))
+        { 
+            DEVICELOGW("MessageID 0x%X (%s) warning with status 0x%X TABLE_NOT_EXIST", res->wMessageID, messageCodeToString(LIBUSB_TRANSFER_TYPE_BULK, header->wMessageID).c_str(), res->wStatus);
+            msg.Result = toUnderlying(Status::TABLE_NOT_EXIST);
         }
         else
         {

@@ -14,7 +14,7 @@ public class StreamProfile extends LrsClass {
         public int frameRate;
     }
 
-    protected StreamProfile(long handle){
+    StreamProfile(long handle){
         mHandle = handle;
         mPp = new ProfileParams();
         nGetProfile(mHandle, mPp);
@@ -42,15 +42,25 @@ public class StreamProfile extends LrsClass {
         return mPp.frameRate;
     }
 
-    public <T extends StreamProfile> T as(Class<T> type) {
-        return (T) this;
+    public boolean is(Extension extension) {
+        return nIsProfileExtendableTo(mHandle, extension.value());
+    }
+
+    public <T extends StreamProfile> T as(Extension extension) {
+        switch (extension){
+            case VIDEO_PROFILE: return (T) new VideoStreamProfile(mHandle);
+            case MOTION_PROFILE: return (T) new MotionStreamProfile(mHandle);
+        }
+        throw new RuntimeException("this profile is not extendable to " + extension.name());
     }
 
     @Override
     public void close() {
-//        nDelete(mHandle);
+//        if(mOwner)
+//            nDelete(mHandle);
     }
 
+    private static native boolean nIsProfileExtendableTo(long handle, int extension);
     private static native void nGetProfile(long handle, ProfileParams params);
     private static native void nDelete(long handle);
 }

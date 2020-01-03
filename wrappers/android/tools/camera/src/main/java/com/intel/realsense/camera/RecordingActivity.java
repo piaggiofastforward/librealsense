@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.WindowManager;
 
 import com.intel.realsense.librealsense.Config;
+import com.intel.realsense.librealsense.FrameSet;
 import com.intel.realsense.librealsense.GLRsSurfaceView;
 
 import java.io.File;
@@ -24,6 +25,7 @@ public class RecordingActivity extends AppCompatActivity {
     private static final int PERMISSIONS_REQUEST_WRITE = 0;
 
     private Streamer mStreamer;
+    private GLRsSurfaceView mGLSurfaceView;
 
     private boolean mPermissionsGrunted = false;
 
@@ -34,6 +36,8 @@ public class RecordingActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_recording);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        mGLSurfaceView = findViewById(R.id.recordingGlSurfaceView);
 
         mStopRecordFab = findViewById(R.id.stopRecordFab);
         mStopRecordFab.setOnClickListener(new View.OnClickListener() {
@@ -68,13 +72,23 @@ public class RecordingActivity extends AppCompatActivity {
         super.onResume();
 
         if(mPermissionsGrunted){
-            mStreamer = new Streamer(this, (GLRsSurfaceView) findViewById(R.id.recordingGlSurfaceView), new Streamer.Listener() {
+            mStreamer = new Streamer(this,true, new Streamer.Listener() {
                 @Override
                 public void config(Config config) {
                     config.enableRecordToFile(getFilePath());
                 }
+
+                @Override
+                public void onFrameset(FrameSet frameSet) {
+                    mGLSurfaceView.upload(frameSet);
+                }
             });
-            mStreamer.start();
+            try {
+                mGLSurfaceView.clear();
+                mStreamer.start();
+            } catch (Exception e) {
+                finish();
+            }
         }
     }
 
@@ -84,10 +98,16 @@ public class RecordingActivity extends AppCompatActivity {
 
         if(mStreamer != null)
             mStreamer.stop();
+        if(mGLSurfaceView != null)
+            mGLSurfaceView.clear();
     }
 
     private String getFilePath(){
-        File folder = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + File.separator + "rs_bags");
+        File rsFolder = new File(Environment.getExternalStorageDirectory().getAbsolutePath() +
+                File.separator + getString(R.string.realsense_folder));
+        rsFolder.mkdir();
+        File folder = new File(Environment.getExternalStorageDirectory().getAbsolutePath() +
+                File.separator + getString(R.string.realsense_folder) + File.separator + "video");
         folder.mkdir();
         SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd_HHmmss");
         String currentDateAndTime = sdf.format(new Date());

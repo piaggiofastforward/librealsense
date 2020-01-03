@@ -36,12 +36,12 @@ namespace librealsense
                 [](perc::TrackingManager* ptr) { perc::TrackingManager::ReleaseInstance(ptr); });
             if (_manager == nullptr)
             {
-                LOG_WARNING("Failed to create TrackingManager");
+                LOG_INFO("Failed to create TrackingManager");
                 return;
             }
             _t = std::thread(&tm2_context::thread_proc, this);
 
-            LOG_INFO("LibTm version 0x" << std::hex << _manager->version());
+            LOG_INFO("LibTm version 0x" << std::hex << _manager->version() << std::dec);
         }
     }
 
@@ -95,7 +95,7 @@ namespace librealsense
 
     void tm2_context::onError(Status error, TrackingDevice* dev)
     {
-        LOG_ERROR("Error occured while connecting device:" << dev << " Error: 0x" << std::hex << static_cast<int>(error));
+        LOG_ERROR("Error occured while connecting device:" << dev << " Error: 0x" << std::hex << static_cast<int>(error) << std::dec);
     }
 
     void tm2_context::thread_proc()

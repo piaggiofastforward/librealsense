@@ -3,7 +3,7 @@
 
 #include "zero-order.h"
 #include <iomanip>
-#include "l500/l500.h"
+#include "l500/l500-depth.h"
 
 const double METER_TO_MM = 1000;
 
@@ -156,8 +156,8 @@ namespace librealsense
         return false;
     }
 
-    zero_order::zero_order(std::shared_ptr<option> zo_point_x, std::shared_ptr<option> zo_point_y)
-       : generic_processing_block("Zero Order Fix"), _first_frame(true), _zo_point_x(zo_point_x), _zo_point_y(zo_point_y)
+    zero_order::zero_order(std::shared_ptr<bool_option> is_enabled_opt)
+       : generic_processing_block("Zero Order Fix"), _first_frame(true), _is_enabled_opt(is_enabled_opt)
     {
         auto ir_threshold = std::make_shared<ptr_option<uint8_t>>(
             0,
@@ -208,10 +208,10 @@ namespace librealsense
         register_option(static_cast<rs2_option>(RS2_OPTION_FILTER_ZO_RTD_LOW_THRESHOLD), rtd_low_threshold);
 
         auto baseline = std::make_shared<ptr_option<float>>(
-            0,
+            -50,
             50,
             1,
-            31,
+            -10,
             &_options.baseline,
             "Baseline");
         baseline->on_set([baseline](float val)
@@ -300,7 +300,7 @@ namespace librealsense
 
     const char* zero_order::get_option_name(rs2_option option) const
     {
-        switch (option)
+        switch (static_cast<zero_order_invalidation_options>(option))
         {
         case zero_order_invalidation_options::RS2_OPTION_FILTER_ZO_IR_THRESHOLD:
             return "IR Threshold";
@@ -329,31 +329,67 @@ namespace librealsense
     {
         if (auto sensor = ((frame_interface*)frame.get())->get_sensor())
         {
-            auto dev = const_cast<device_interface*>(&(sensor->get_device()));
-
-            if (auto l5 = dynamic_cast<l500_device*>(dev))
+            if(auto l5 = dynamic_cast<l500_depth_sensor_interface*>(sensor.get()))
             {
                 _options.baseline = l5->read_baseline();
                 return true;
+            }
+            // For playback
+            else
+            {
+                auto extendable = As<librealsense::extendable_interface>(sensor);
+                if (extendable && extendable->extend_to(TypeToExtension<librealsense::l500_depth_sensor_interface>::value, (void**)(&l5)))
+                {
+                    return l5->read_baseline();
+                }
             }
         }
         return false;
     }
 
+    ivcam2::intrinsic_params zero_order::try_read_intrinsics(const rs2::frame & frame)
+    {
+        if (auto sensor = ((frame_interface*)frame.get())->get_sensor())
+        {
+            auto profile = frame.get_profile().as<rs2::video_stream_profile>();
+
+            if (auto l5 = dynamic_cast<l500_depth_sensor_interface*>(sensor.get()))
+            {
+                return l500_depth_sensor::get_intrinsic_params(profile.width(), profile.height(), l5->get_intrinsic());
+            }
+            // For playback
+            else
+            {
+                auto extendable = As<librealsense::extendable_interface>(sensor);
+                if (extendable && extendable->extend_to(TypeToExtension<librealsense::l500_depth_sensor_interface>::value, (void**)(&l5)))
+                {
+                    return l500_depth_sensor::get_intrinsic_params(profile.width(), profile.height(), l5->get_intrinsic());
+                }
+            }
+        }
+        throw std::runtime_error("didn't succeed to get intrinsics");
+    }
+
+    std::pair<int, int> zero_order::get_zo_point(const rs2::frame& frame)
+    {
+        auto intrinsics = try_read_intrinsics(frame);
+        return { intrinsics.zo.x, intrinsics.zo.y };
+    }
+
     rs2::frame zero_order::process_frame(const rs2::frame_source& source, const rs2::frame& f)
     {
+        // If is_enabled_opt is false, meaning this processing block is not active,
+        // return the frame as is.
+        if (auto is_enabled = _is_enabled_opt.lock())
+            if (!is_enabled->is_true())
+                return f;
+
         std::vector<rs2::frame> result;
 
         if (_first_frame)
         {
-            if (_zo_point_x == nullptr || _zo_point_y == nullptr)
-            {
-                if (!try_get_zo_point(f))
-                {
-                    LOG_WARNING("Couldn't read the zo point");
-                    return f;
-                }
-            }
+            auto zo = get_zo_point(f);
+            LOG_DEBUG("ZO values: "<<zo.first<<", "<<zo.second);
 
             if (!try_read_baseline(f))
                 LOG_WARNING("Couldn't read the baseline value");
@@ -362,12 +398,17 @@ namespace librealsense
         }
      
         auto data = f.as<rs2::frameset>();
-        
-        if (!_source_profile_depth)
-            _source_profile_depth = data.get_depth_frame().get_profile();
+        if (!data)
+        {
+            LOG_ERROR("Frame received is not a frameset.");
+            return f;
+        }
 
-        if (!_target_profile_depth)
+        if (_source_profile_depth.get() != data.get_depth_frame().get_profile().get())
+        {
+            _source_profile_depth = data.get_depth_frame().get_profile();
             _target_profile_depth = _source_profile_depth.clone(_source_profile_depth.stream_type(), _source_profile_depth.stream_index(), _source_profile_depth.format());
+        }
 
         auto depth_frame = data.get_depth_frame();
         auto ir_frame = data.get_infrared_frame();
@@ -380,12 +421,12 @@ namespace librealsense
         rs2::frame confidence_out;
         if (confidence_frame)
         {
-            if(!_source_profile_confidence)
+            if (_source_profile_confidence.get() != confidence_frame.get_profile().get())
+            {
                 _source_profile_confidence = confidence_frame.get_profile();
-
-            if (!_target_profile_confidence)
                 _target_profile_confidence = _source_profile_confidence.clone(_source_profile_confidence.stream_type(), _source_profile_confidence.stream_index(), _source_profile_confidence.format());
 
+            }
             confidence_out = source.allocate_video_frame(_source_profile_confidence, confidence_frame, 0, 0, 0, 0, RS2_EXTENSION_VIDEO_FRAME);
         }
         auto depth_intrinsics = depth_frame.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
@@ -397,6 +438,8 @@ namespace librealsense
         {
             confidence_output = (uint8_t*)confidence_out.get_data();
         }
+
+        auto zo = get_zo_point(depth_frame);
 
         if (zero_order_invalidation((const uint16_t*)depth_frame.get_data(),
             (const uint8_t*)ir_frame.get_data(),
@@ -411,7 +454,7 @@ namespace librealsense
         },
             points.get_vertices(),
             depth_intrinsics,
-            _options, _zo_point_x->query(), _zo_point_y->query()))
+            _options, zo.first, zo.second))
         {
             result.push_back(depth_out);
             result.push_back(ir_frame);
@@ -428,23 +471,14 @@ namespace librealsense
         return source.allocate_composite_frame(result);
     }
 
-    bool zero_order::try_get_zo_point(const rs2::frame & frame)
-    {
-        if (auto sensor = ((frame_interface*)frame.get())->get_sensor())
-        {
-            if (auto l500 = As<l500_device::l500_depth_sensor>(sensor))
-            {
-                _zo_point_x = l500->get_zo_point_x();
-                _zo_point_y = l500->get_zo_point_y();
-                return true;
-            }
-        }
-        LOG_WARNING("Could not read zo point values!");
-        return false;
-    }
-
     bool zero_order::should_process(const rs2::frame& frame)
     {
+        // If is_enabled_opt is false, meaning this processing block is not active,
+        // return true in order to passthrough the frame.
+        if (auto is_enabled = _is_enabled_opt.lock())
+            if (!is_enabled->is_true())
+                return true;
+
         if (auto set = frame.as<rs2::frameset>())
         {
             if (!set.get_depth_frame() || !set.get_infrared_frame())
@@ -453,10 +487,15 @@ namespace librealsense
             }
             auto depth_frame = set.get_depth_frame();
 
-            if (!_first_frame && (_zo_point_x && (_zo_point_x->query() - _options.patch_size < 0 || _zo_point_x->query() + _options.patch_size >= depth_frame.get_width())) ||
-                                 (_zo_point_y && (_zo_point_y->query() - _options.patch_size < 0 || _zo_point_y->query() + _options.patch_size >= depth_frame.get_height())))
+            auto zo = get_zo_point(depth_frame);
+
+            if (zo.first - _options.patch_size < 0 || zo.first + _options.patch_size >= depth_frame.get_width() ||
+               (zo.second - _options.patch_size < 0 || zo.second + _options.patch_size >= depth_frame.get_height()))
+            {
                 return false;
+            }
             return true;
+
         }
         return false;
     }
@@ -465,13 +504,14 @@ namespace librealsense
     {
         if (auto composite = input.as<rs2::frameset>())
         {
-            composite.foreach([&](rs2::frame f) 
+            composite.foreach_rs([&](rs2::frame f)
             {
                 if (f.get_profile().stream_type() != RS2_STREAM_DEPTH && f.get_profile().stream_type() != RS2_STREAM_INFRARED && f.get_profile().stream_type() != RS2_STREAM_CONFIDENCE && 
                     results.size() > 0)
                     results.push_back(f);
             });
         }
+
         return source.allocate_composite_frame(results);
     }
 }

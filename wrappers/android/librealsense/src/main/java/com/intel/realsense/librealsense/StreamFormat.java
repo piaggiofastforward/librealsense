@@ -20,8 +20,10 @@ public enum StreamFormat {
     MOTION_XYZ32F(16),
     GPIO_RAW(17),
     POSE(18),
-    DISPARITY32(19);
-
+    DISPARITY32(19),
+    Y10BPACK(20),
+    DISTANCE(21),
+    MJPEG(22);
     private final int mValue;
 
     private StreamFormat(int value) { mValue = value; }

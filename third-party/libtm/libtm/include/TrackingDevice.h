@@ -265,6 +265,15 @@ namespace perc
          */
          virtual Status GetExtrinsics(IN SensorId id, OUT TrackingData::SensorExtrinsics& extrinsics) = 0;
 
+         /**
+         * @brief SetExtrinsics
+         *        Set extrinsic pose of on individual sensor in the device relative to the default one
+         * @param id - Sensor Id (Sensor type + sensor index)
+         * @param extrinsics - Input container for extrinsic parameters
+         * @return Status
+         */
+         virtual Status SetExtrinsics(IN SensorId id, IN const TrackingData::SensorExtrinsics& extrinsics) = 0;
+
         /**
         * @brief SetOccupancyMapControl
         *        Enables/disables occupancy map calculation. Occupancy map calculation is based on 6DoF calculation, 
@@ -408,14 +417,6 @@ namespace perc
         * @return Status
         */
         virtual Status SetLocalizationData(IN Listener* listener, IN uint32_t length, IN const uint8_t* buffer) = 0;
-
-        /**
-        * @brief ResetLocalizationData
-        *        Resets the localization data
-        * @param flag - 0 - Reset all localization data tables, 1 - reset only the map by its mapIndex
-        * @return Status
-        */
-        virtual Status ResetLocalizationData(IN uint8_t flag) = 0;
 
         /**
         * @brief SetStaticNode
